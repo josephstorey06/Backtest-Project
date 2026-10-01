@@ -1,0 +1,95 @@
+import numpy as np
+import pandas as pd
+ 
+TRADING_DAYS = 252
+RISK_FREE = 0.04     
+COST_BPS = 5         
+WARMUP = 250         
+ 
+ 
+def sharpe(returns, rf=RISK_FREE):
+    excess = returns - rf / TRADING_DAYS
+    return np.sqrt(TRADING_DAYS) * excess.mean() / excess.std()
+ 
+ 
+def max_drawdown(returns):
+    wealth = (1 + returns).cumprod()
+    return (wealth / wealth.cummax() - 1).min()
+ 
+ 
+def ma_crossover(prices, fast, slow, cost_bps=COST_BPS):
+    """Long when the fast moving average is above the slow one, otherwise flat.
+    Equal weight across assets; flat assets earn 0 (cash)."""
+    rets = prices.pct_change()
+    signal = (prices.rolling(fast).mean() > prices.rolling(slow).mean()).astype(float)
+ 
+    
+    position = signal.shift(1).fillna(0)
+ 
+    turnover = position.diff().abs().fillna(0)
+    asset_rets = position * rets - turnover * cost_bps / 10_000
+    return asset_rets.mean(axis=1)
+ 
+ 
+def buy_and_hold(prices):
+    return prices.pct_change().mean(axis=1)
+ 
+ 
+def sensitivity_grid(prices, fasts, slows):
+    grid = pd.DataFrame(index=fasts, columns=slows, dtype=float)
+    for f in fasts:
+        for s in slows:
+            if f < s:
+                r = ma_crossover(prices, f, s).iloc[WARMUP:]
+                grid.loc[f, s] = sharpe(r)
+    return grid
+ 
+ 
+if __name__ == "__main__":
+    import yfinance as yf
+    import matplotlib.pyplot as plt
+ 
+    
+    tickers = ["SPY", "EFA", "TLT", "GLD", "DBC"]
+    prices = yf.download(tickers, start="2010-01-01", end="2026-01-01",
+                         auto_adjust=True, progress=False)["Close"].dropna()
+    print(prices.shape)
+    print(prices.head())
+    print(prices.isna().sum())
+ 
+    
+    strat = ma_crossover(prices, 50, 200).iloc[WARMUP:]
+    bh = buy_and_hold(prices).iloc[WARMUP:]
+    print(f"Trend strategy : Sharpe {sharpe(strat):.2f}, max drawdown {max_drawdown(strat):.1%}")
+    print(f"Buy and hold   : Sharpe {sharpe(bh):.2f}, max drawdown {max_drawdown(bh):.1%}")
+ 
+    
+    fasts = [10, 20, 50, 100]
+    slows = [50, 100, 150, 200, 250]
+    grid = sensitivity_grid(prices, fasts, slows)
+    print("\nSharpe by (fast rows, slow columns):")
+    print(grid.round(2))
+ 
+    
+    mid = len(prices) // 2
+    train, test = prices.iloc[:mid], prices.iloc[mid - WARMUP:]
+    best = None
+    for f in fasts:
+        for s in slows:
+            if f < s:
+                sh = sharpe(ma_crossover(train, f, s).iloc[WARMUP:])
+                if best is None or sh > best[0]:
+                    best = (sh, f, s)
+    _, bf, bs = best
+    oos = ma_crossover(test, bf, bs).iloc[WARMUP:]
+    oos_bh = buy_and_hold(test).iloc[WARMUP:]
+    print(f"\nBest in-sample windows: fast {bf}, slow {bs} (Sharpe {best[0]:.2f})")
+    print(f"Out-of-sample Sharpe: {sharpe(oos):.2f} vs buy and hold {sharpe(oos_bh):.2f}")
+ 
+    
+    (1 + strat).cumprod().plot(label="50/200 trend strategy", figsize=(10, 6))
+    (1 + bh).cumprod().plot(label="Equal-weight buy and hold")
+    plt.ylabel("Growth of 1")
+    plt.title("Moving-average trend following vs buy and hold")
+    plt.legend()
+    plt.show()
